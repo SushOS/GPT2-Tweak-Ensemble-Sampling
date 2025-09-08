@@ -29,6 +29,5 @@ python3 train_kant.py config/finetune_kant.py --device=mps --init_from=gpt2
 
 ```bash
 python sample.py \
-    --init_from=gpt2 \     
     --start="What is the answer to life, the universe, and everything?" \--num_samples=5 --max_new_tokens=100
 ```
