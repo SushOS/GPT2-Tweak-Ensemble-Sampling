@@ -10,12 +10,12 @@ from model import GPTConfig, GPT, ensemble_generate
 
 # -----------------------------------------------------------------------------
 # Model A (e.g., Grimms)
-init_from = 'gpt2'  # A: 'resume' or a gpt2 variant like 'gpt2', 'gpt2-medium', etc.
-out_dir = 'nanoGPT/out-grimm'       # A: directory containing ckpt.pt if init_from == 'resume'
+init_from = 'resume'  # A: 'resume' or a gpt2 variant like 'gpt2', 'gpt2-medium', etc.
+out_dir = 'out-grimm'       # A: directory containing ckpt.pt if init_from == 'resume'
 
 # Model B (e.g., Critique)
-init_from_b = 'gpt2'   # B: 'resume' or a gpt2 variant
-out_dir_b = 'nanoGPT/out-critique'      # B: directory containing ckpt.pt if init_from_b == 'resume'
+init_from_b = 'resume'   # B: 'resume' or a gpt2 variant
+out_dir_b = 'out-kant'      # B: directory containing ckpt.pt if init_from_b == 'resume'
 
 # Decoding & prompt
 start = "\n" # or "<|endoftext|>" etc.; also supports "FILE:path.txt"
@@ -26,7 +26,7 @@ top_k = 200
 
 # Ensemble weights; you can provide multiple pairs to compare different mixtures
 # e.g., [(0.3, 0.7), (0.7, 0.3), (0.5, 0.5)]
-weight_pairs = [(0.5, 0.5)]
+weight_pairs = [(0.3, 0.7), (0.7, 0.3), (0.5, 0.5)]
 
 # System / performance
 seed = 1337
@@ -121,3 +121,4 @@ with torch.no_grad():
                 )
                 print(decode(y[0].tolist()))
                 print('---------------')
+                
