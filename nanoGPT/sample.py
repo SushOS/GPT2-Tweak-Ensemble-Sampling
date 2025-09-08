@@ -1,89 +1,215 @@
+# """
+# Sample from a trained model
+# """
+# import os
+# import pickle
+# from contextlib import nullcontext
+# import torch
+# import tiktoken
+# from model import GPTConfig, GPT
+
+# # -----------------------------------------------------------------------------
+# init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
+# out_dir = 'out' # ignored if init_from is not 'resume'
+# start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+# num_samples = 10 # number of samples to draw
+# max_new_tokens = 500 # number of tokens generated in each sample
+# temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+# top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+# seed = 1337
+# device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+# dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
+# compile = False # use PyTorch 2.0 to compile the model to be faster
+# exec(open('configurator.py').read()) # overrides from command line or config file
+# # -----------------------------------------------------------------------------
+
+# torch.manual_seed(seed)
+# torch.cuda.manual_seed(seed)
+# torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
+# torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
+# device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+# ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+# ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
+
+# # model
+# if init_from == 'resume':
+#     # init from a model saved in a specific directory
+#     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+#     checkpoint = torch.load(ckpt_path, map_location=device)
+#     gptconf = GPTConfig(**checkpoint['model_args'])
+#     model = GPT(gptconf)
+#     state_dict = checkpoint['model']
+#     unwanted_prefix = '_orig_mod.'
+#     for k,v in list(state_dict.items()):
+#         if k.startswith(unwanted_prefix):
+#             state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+#     model.load_state_dict(state_dict)
+# elif init_from.startswith('gpt2'):
+#     # init from a given GPT-2 model
+#     model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+
+# model.eval()
+# model.to(device)
+# if compile:
+#     model = torch.compile(model) # requires PyTorch 2.0 (optional)
+
+# # look for the meta pickle in case it is available in the dataset folder
+# load_meta = False
+# if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']: # older checkpoints might not have these...
+#     meta_path = os.path.join('data', checkpoint['config']['dataset'], 'meta.pkl')
+#     load_meta = os.path.exists(meta_path)
+# if load_meta:
+#     print(f"Loading meta from {meta_path}...")
+#     with open(meta_path, 'rb') as f:
+#         meta = pickle.load(f)
+#     # TODO want to make this more general to arbitrary encoder/decoder schemes
+#     stoi, itos = meta['stoi'], meta['itos']
+#     encode = lambda s: [stoi[c] for c in s]
+#     decode = lambda l: ''.join([itos[i] for i in l])
+# else:
+#     # ok let's assume gpt-2 encodings by default
+#     print("No meta.pkl found, assuming GPT-2 encodings...")
+#     enc = tiktoken.get_encoding("gpt2")
+#     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+#     decode = lambda l: enc.decode(l)
+
+# # encode the beginning of the prompt
+# if start.startswith('FILE:'):
+#     with open(start[5:], 'r', encoding='utf-8') as f:
+#         start = f.read()
+# start_ids = encode(start)
+# x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+
+# # run generation
+# with torch.no_grad():
+#     with ctx:
+#         for k in range(num_samples):
+#             y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
+#             print(decode(y[0].tolist()))
+#             print('---------------')
+
+
+
 """
-Sample from a trained model
+Sample from an ensemble of two trained models by averaging their probability distributions.
 """
 import os
 import pickle
 from contextlib import nullcontext
 import torch
 import tiktoken
-from model import GPTConfig, GPT
+from model import GPTConfig, GPT, ensemble_generate
 
 # -----------------------------------------------------------------------------
-init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
-out_dir = 'out' # ignored if init_from is not 'resume'
-start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 10 # number of samples to draw
-max_new_tokens = 500 # number of tokens generated in each sample
-temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+# Model A (e.g., Grimms)
+init_from = 'gpt2'  # A: 'resume' or a gpt2 variant like 'gpt2', 'gpt2-medium', etc.
+out_dir = 'nanoGPT/out-grimm'       # A: directory containing ckpt.pt if init_from == 'resume'
+
+# Model B (e.g., Critique)
+init_from_b = 'gpt2'   # B: 'resume' or a gpt2 variant
+out_dir_b = 'nanoGPT/out-critique'      # B: directory containing ckpt.pt if init_from_b == 'resume'
+
+# Decoding & prompt
+start = "\n" # or "<|endoftext|>" etc.; also supports "FILE:path.txt"
+num_samples = 10
+max_new_tokens = 500
+temperature = 0.8
+top_k = 200
+
+# Ensemble weights; you can provide multiple pairs to compare different mixtures
+# e.g., [(0.3, 0.7), (0.7, 0.3), (0.5, 0.5)]
+weight_pairs = [(0.5, 0.5)]
+
+# System / performance
 seed = 1337
-device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
-dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32' or 'bfloat16' or 'float16'
-compile = False # use PyTorch 2.0 to compile the model to be faster
-exec(open('configurator.py').read()) # overrides from command line or config file
+device = 'cpu' # 'cpu', 'cuda', 'cuda:0', etc.
+dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # or 'float32'
+compile = False
+exec(open('configurator.py').read()) # allows CLI overrides like out_dir=... out_dir_b=... weight_pairs=[(0.3,0.7)]
 # -----------------------------------------------------------------------------
 
 torch.manual_seed(seed)
-torch.cuda.manual_seed(seed)
-torch.backends.cuda.matmul.allow_tf32 = True # allow tf32 on matmul
-torch.backends.cudnn.allow_tf32 = True # allow tf32 on cudnn
-device_type = 'cuda' if 'cuda' in device else 'cpu' # for later use in torch.autocast
+device_type = 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=device_type, dtype=ptdtype)
 
-# model
-if init_from == 'resume':
-    # init from a model saved in a specific directory
-    ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-    checkpoint = torch.load(ckpt_path, map_location=device)
-    gptconf = GPTConfig(**checkpoint['model_args'])
-    model = GPT(gptconf)
-    state_dict = checkpoint['model']
-    unwanted_prefix = '_orig_mod.'
-    for k,v in list(state_dict.items()):
-        if k.startswith(unwanted_prefix):
-            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-    model.load_state_dict(state_dict)
-elif init_from.startswith('gpt2'):
-    # init from a given GPT-2 model
-    model = GPT.from_pretrained(init_from, dict(dropout=0.0))
+def load_model(init_from_kind: str, out_dir_path: str):
+    if init_from_kind == 'resume':
+        ckpt_path = os.path.join(out_dir_path, 'ckpt.pt')
+        checkpoint = torch.load(ckpt_path, map_location=device)
+        gptconf = GPTConfig(**checkpoint['model_args'])
+        model = GPT(gptconf)
+        state_dict = checkpoint['model']
+        unwanted_prefix = '_orig_mod.'
+        for k, v in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+        model.load_state_dict(state_dict)
+        return model, checkpoint
+    elif init_from_kind.startswith('gpt2'):
+        model = GPT.from_pretrained(init_from_kind, dict(dropout=0.0))
+        return model, None
+    else:
+        raise ValueError(f"Unsupported init_from: {init_from_kind}")
 
-model.eval()
-model.to(device)
+# Build both models
+model_a, checkpoint_a = load_model(init_from, out_dir)
+model_b, checkpoint_b = load_model(init_from_b, out_dir_b)
+
+model_a.eval().to(device)
+model_b.eval().to(device)
+
 if compile:
-    model = torch.compile(model) # requires PyTorch 2.0 (optional)
+    model_a = torch.compile(model_a)
+    model_b = torch.compile(model_b)
 
-# look for the meta pickle in case it is available in the dataset folder
+# look for the meta pickle in case it is available in the dataset folder (use A's dataset if present)
 load_meta = False
-if init_from == 'resume' and 'config' in checkpoint and 'dataset' in checkpoint['config']: # older checkpoints might not have these...
-    meta_path = os.path.join('data', checkpoint['config']['dataset'], 'meta.pkl')
+if init_from == 'gpt2' and checkpoint_a is not None and 'config' in checkpoint_a and 'dataset' in checkpoint_a['config']:
+    meta_path = os.path.join('data', checkpoint_a['config']['dataset'], 'meta.pkl')
     load_meta = os.path.exists(meta_path)
 if load_meta:
     print(f"Loading meta from {meta_path}...")
     with open(meta_path, 'rb') as f:
         meta = pickle.load(f)
-    # TODO want to make this more general to arbitrary encoder/decoder schemes
     stoi, itos = meta['stoi'], meta['itos']
     encode = lambda s: [stoi[c] for c in s]
     decode = lambda l: ''.join([itos[i] for i in l])
 else:
-    # ok let's assume gpt-2 encodings by default
+    # assume GPT-2 BPE encodings by default
     print("No meta.pkl found, assuming GPT-2 encodings...")
     enc = tiktoken.get_encoding("gpt2")
     encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
     decode = lambda l: enc.decode(l)
+
+# sanity: vocab sizes should match for probability mixing
+if model_a.config.vocab_size != model_b.config.vocab_size:
+    raise ValueError(f"vocab_size mismatch: A={model_a.config.vocab_size}, B={model_b.config.vocab_size}")
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):
     with open(start[5:], 'r', encoding='utf-8') as f:
         start = f.read()
 start_ids = encode(start)
-x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+x0 = torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...]
 
-# run generation
+# run ensemble generation
 with torch.no_grad():
     with ctx:
-        for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
-            print('---------------')
+        for (wa, wb) in weight_pairs:
+            # print header for this configuration
+            print("=" * 80)
+            print(f"Ensemble mixture: weight_a={wa:.2f}, weight_b={wb:.2f}, temperature={temperature}, top_k={top_k}")
+            print("-" * 80)
+            for k in range(num_samples):
+                x = x0.clone()
+                y = ensemble_generate(
+                    model_a, model_b, x,
+                    max_new_tokens=max_new_tokens,
+                    temperature=temperature,
+                    top_k=top_k,
+                    weight_a=wa,
+                    weight_b=wb,
+                )
+                print(decode(y[0].tolist()))
+                print('---------------')
